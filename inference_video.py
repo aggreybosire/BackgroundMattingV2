@@ -12,9 +12,10 @@ Example:
         --model-checkpoint "PATH_TO_CHECKPOINT" \
         --video-src "PATH_TO_VIDEO_SRC" \
         --video-bgr "PATH_TO_VIDEO_BGR" \
+        --new-bgr "PATH_TO_NEW_VIDEO_BGR" \
         --video-resize 1920 1080 \
         --output-dir "PATH_TO_OUTPUT_DIR" \
-        --output-type com fgr pha err ref
+        --output-type com com1 fgr pha err ref
 
 """
 
@@ -55,12 +56,13 @@ parser.add_argument('--model-refine-kernel-size', type=int, default=3)
 
 parser.add_argument('--video-src', type=str, required=True)
 parser.add_argument('--video-bgr', type=str, required=True)
+parser.add_argument('--new-bgr', type=str, required=True)
 parser.add_argument('--video-resize', type=int, default=None, nargs=2)
 
 parser.add_argument('--preprocess-alignment', action='store_true')
 
 parser.add_argument('--output-dir', type=str, required=True)
-parser.add_argument('--output-types', type=str, required=True, nargs='+', choices=['com', 'pha', 'fgr', 'err', 'ref'])
+parser.add_argument('--output-types', type=str, required=True, nargs='+', choices=['com', 'pha', 'fgr', 'err', 'ref','com1'])
 parser.add_argument('--output-format', type=str, default='video', choices=['video', 'image_sequences'])
 
 args = parser.parse_args()
@@ -128,7 +130,8 @@ model.load_state_dict(torch.load(args.model_checkpoint), strict=False)
 # Load video and background
 vid = VideoDataset(args.video_src)
 bgr = [Image.open(args.video_bgr).convert('RGB')]
-dataset = ZipDataset([vid, bgr], transforms=A.PairCompose([
+nbgr = [Image.open(args.new_bgr).convert('RGB')]
+dataset = ZipDataset([vid, bgr, nbgr], transforms=A.PairCompose([
     A.PairApply(T.Resize(args.video_resize[::-1]) if args.video_resize else nn.Identity()),
     HomographicAlignment() if args.preprocess_alignment else A.PairApply(nn.Identity()),
     A.PairApply(T.ToTensor())
@@ -157,6 +160,8 @@ if args.output_format == 'video':
         err_writer = VideoWriter(os.path.join(args.output_dir, 'err.mp4'), vid.frame_rate, w, h)
     if 'ref' in args.output_types:
         ref_writer = VideoWriter(os.path.join(args.output_dir, 'ref.mp4'), vid.frame_rate, w, h)
+    if 'com1' in args.output_types:
+        com1_writer = VideoWriter(os.path.join(args.output_dir, 'com1.mp4'), vid.frame_rate, w, h)
 else:
     if 'com' in args.output_types:
         com_writer = ImageSequenceWriter(os.path.join(args.output_dir, 'com'), 'png')
@@ -168,13 +173,16 @@ else:
         err_writer = ImageSequenceWriter(os.path.join(args.output_dir, 'err'), 'jpg')
     if 'ref' in args.output_types:
         ref_writer = ImageSequenceWriter(os.path.join(args.output_dir, 'ref'), 'jpg')
-    
+    if 'com1' in args.output_types:
+        com1_writer = ImageSequenceWriter(os.path.join(args.output_dir, 'com1'), 'png')
 
 # Conversion loop
 with torch.no_grad():
-    for src, bgr in tqdm(DataLoader(dataset, batch_size=1, pin_memory=True)):
+    for src, bgr,nbgr in tqdm(DataLoader(dataset, batch_size=1, pin_memory=True)):
         src = src.cuda(non_blocking=True)
         bgr = bgr.cuda(non_blocking=True)
+       # nbgr = [Image.open(args.new_bgr).convert('RGB')]
+        nbgr = nbgr.cuda(non_blocking=True)
         
         if args.model_type == 'mattingbase':
             pha, fgr, err, _ = model(src, bgr)
@@ -193,6 +201,18 @@ with torch.no_grad():
                 # Output composite as rgba png images
                 com = torch.cat([fgr * pha.ne(0), pha], dim=1)
                 com_writer.add_batch(com)
+
+        if 'com1' in args.output_types:
+            if args.output_format == 'video':
+                # Output composite with new background
+                                
+                com1 = pha * fgr + (1 - pha) * nbgr
+                com1_writer.add_batch(com1)
+            else:
+                # Output composite as rgba png images
+                com1 = torch.cat([fgr * pha.ne(0), pha], dim=1)
+                com_writer.add_batch(com1)
+
         if 'pha' in args.output_types:
             pha_writer.add_batch(pha)
         if 'fgr' in args.output_types:
